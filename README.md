@@ -73,7 +73,7 @@ The Knowledge Base retrieval also applies a metadata filter (`Department == {dep
 5. Salesforce returns an access token scoped to the resolved user
 6. Agent queries Salesforce with department-scoped SOQL
 
-No static Salesforce tokens are stored in the agent — AgentCore Identity handles token acquisition, caching, and refresh automatically.
+No static Salesforce tokens are stored in the agent. AgentCore Identity handles token acquisition, caching, and refresh automatically.
 
 ## Project Structure
 
