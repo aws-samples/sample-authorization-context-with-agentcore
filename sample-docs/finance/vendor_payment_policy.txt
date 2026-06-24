@@ -1,0 +1,28 @@
+CustomerHub Finance — Vendor Payment Policy (v3.1)
+
+Payment Terms:
+- Standard vendors: Net 30 from invoice date
+- Strategic partners: Net 45 with 2% early payment discount (10 days)
+- International vendors: Net 60, wire transfer only, currency hedging applied
+
+Approval Thresholds:
+- Under $5,000: Department manager approval
+- $5,000 - $25,000: Finance director approval
+- $25,000 - $100,000: VP Finance approval + budget code verification
+- Over $100,000: CFO approval + board notification
+
+Invoice Processing:
+1. Vendor submits invoice to ap@customerhub.example.com
+2. AP team validates against PO and receiving records (2 business days)
+3. Three-way match: PO, invoice, goods receipt
+4. Discrepancies routed to procurement for resolution
+5. Approved invoices queued for next payment cycle (weekly, Fridays)
+
+Expense Reimbursement:
+- Receipts required for all expenses over $25
+- Mileage rate: $0.67/mile (IRS 2024 standard)
+- Per diem: $75/day domestic, $120/day international
+- Submission deadline: 30 days from expense date
+
+Department: Finance
+Classification: Internal Use Only

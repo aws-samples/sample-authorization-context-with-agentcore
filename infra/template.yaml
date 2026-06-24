@@ -1,0 +1,716 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CustomerHub CRM Auth - Cognito User Pool with department custom claim,
+  Pre-Token Generation Lambda trigger, DynamoDB table, S3 Knowledge Base
+  bucket, AgentCore execution roles with ABAC policies, and AgentCore
+  Identity credential provider for Salesforce OAuth2 Token Exchange
+  (ON_BEHALF_OF) integration.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Deployment environment
+
+  KnowledgeBaseBucketName:
+    Type: String
+    Default: ''
+    Description: >
+      Optional custom name for the Knowledge Base S3 bucket.
+      Leave empty to auto-generate a unique name using the stack name.
+
+  SalesforceInstanceUrl:
+    Type: String
+    Default: ''
+    Description: Salesforce instance URL (e.g. https://myorg.my.salesforce.com)
+
+  SalesforceClientId:
+    Type: String
+    Default: ''
+    Description: Salesforce Connected App client ID
+
+  SalesforceClientSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Salesforce Connected App client secret (stored in Secrets Manager for Token Exchange)
+
+Conditions:
+  HasCustomBucketName: !Not [!Equals [!Ref KnowledgeBaseBucketName, '']]
+  HasSalesforceConfig: !Not [!Equals [!Ref SalesforceClientId, '']]
+
+Resources:
+  # --- AgentCore Identity: Salesforce Credential Provider (Token Exchange) ---
+  # Uses ON_BEHALF_OF_TOKEN_EXCHANGE: the agent exchanges the user's Cognito
+  # token for a user-scoped Salesforce access token via RFC 8693. Salesforce
+  # enforces access via sharing rules on the resolved user, removing the need
+  # for agent-side SOQL filtering.
+  SalesforceTokenExchangeSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasSalesforceConfig
+    Properties:
+      Name: !Sub 'salesforce-token-exchange-secret-${Environment}'
+      Description: Salesforce Connected App client secret for Token Exchange flow
+      SecretString: !Sub '{"client_secret": "${SalesforceClientSecret}"}'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+  SalesforceCredentialProvider:
+    Type: AWS::BedrockAgentCore::OAuth2CredentialProvider
+    Condition: HasSalesforceConfig
+    DependsOn: SalesforceTokenExchangeSecret
+    Properties:
+      Name: !Sub 'salesforce-token-exchange-${Environment}'
+      CredentialProviderVendor: CustomOauth2
+      Oauth2ProviderConfigInput:
+        CustomOauth2ProviderConfig:
+          ClientId: !Ref SalesforceClientId
+          ClientSecretSource: EXTERNAL
+          ClientSecretConfig:
+            SecretId: !Ref SalesforceTokenExchangeSecret
+            JsonKey: client_secret
+          OauthDiscovery:
+            AuthorizationServerMetadata:
+              Issuer: !Ref SalesforceInstanceUrl
+              AuthorizationEndpoint: !Sub '${SalesforceInstanceUrl}/services/oauth2/authorize'
+              TokenEndpoint: !Sub '${SalesforceInstanceUrl}/services/oauth2/token'
+          OnBehalfOfTokenExchangeConfig:
+            GrantType: TOKEN_EXCHANGE
+            TokenExchangeGrantTypeConfig:
+              ActorTokenContent: NONE
+              
+  # --- Lambda Function ---
+  PreTokenGenerationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'customerhub-pre-token-generation-${Environment}'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          VALID_DEPARTMENTS = {'Sales', 'Finance'}
+
+          def lambda_handler(event, context):
+              """
+              Cognito Pre-Token Generation V2 trigger.
+              Adds department claim to BOTH ID token and access token.
+
+              Trigger event version: TOKEN_GENERATION_PRE_TOKEN_GENERATION_V2
+              Must be configured in Cognito User Pool trigger settings.
+              V1 format (claimsOverrideDetails) only modifies the ID token.
+              V2 format (claimsAndScopeOverrideDetails) modifies both.
+              """
+              logger.info("Pre-Token Generation V2 trigger invoked for user: %s",
+                          event['userName'])
+              user_attributes = event['request']['userAttributes']
+              raw_department = user_attributes.get('custom:department', '')
+              department = raw_department.strip().capitalize()
+
+              if not department or department not in VALID_DEPARTMENTS:
+                  raise Exception(
+                      f"User '{event['userName']}' has invalid or missing department: "
+                      f"'{raw_department}'. Valid values: {sorted(VALID_DEPARTMENTS)}. "
+                      f"Token issuance blocked."
+                  )
+
+              logger.info("Injecting department claim: %s for user: %s",
+                          department, event['userName'])
+
+              # V2 format: injects into BOTH id token and access token.
+              #
+              # The ID token additionally carries the special
+              # 'https://aws.amazon.com/tags' claim. AWS STS reads this claim
+              # during AssumeRoleWithWebIdentity and converts it into session
+              # tags (aws:PrincipalTag/department). This lets DynamoDB access
+              # be scoped to the user's department via IAM ABAC, without the
+              # agent holding any static DynamoDB permissions.
+              #
+              # IMPORTANT: STS requires this claim to be a JSON OBJECT (map),
+              # NOT a stringified JSON value. The Cognito V2 trigger supports
+              # complex claim values, so we pass a dict directly. Using
+              # json.dumps() here would make the claim a string and STS would
+              # reject the token with "https://aws.amazon.com/tags in claim is
+              # not a map."
+              sts_tags = {
+                  "principal_tags": {"department": [department]},
+                  "transitive_tag_keys": ["department"]
+              }
+              event['response']['claimsAndScopeOverrideDetails'] = {
+                  'idTokenGeneration': {
+                      'claimsToAddOrOverride': {
+                          'department': department,
+                          'https://aws.amazon.com/tags': sts_tags
+                      }
+                  },
+                  'accessTokenGeneration': {
+                      'claimsToAddOrOverride': {
+                          'department': department
+                      }
+                  }
+              }
+              return event
+      Role: !GetAtt PreTokenGenerationRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      ReservedConcurrentExecutions: 10
+
+  PreTokenGenerationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'customerhub-pre-token-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  PreTokenGenerationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PreTokenGenerationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+  # --- Cognito User Pool ---
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'customerhub-user-pool-${Environment}'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: department
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          StringAttributeConstraints:
+            MinLength: '1'
+            MaxLength: '50'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      LambdaConfig:
+        PreTokenGeneration: !GetAtt PreTokenGenerationFunction.Arn
+        PreTokenGenerationConfig:
+          LambdaArn: !GetAtt PreTokenGenerationFunction.Arn
+          LambdaVersion: V2_0
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'customerhub-app-client-${Environment}'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # --- IAM OIDC Provider for Cognito User Pool ---
+  # Registers the Cognito User Pool as a trusted OpenID Connect identity
+  # provider in IAM. This lets AWS STS validate JWTs issued by this pool
+  # during AssumeRoleWithWebIdentity. The signature/issuer are verified by
+  # STS against the pool's published JWKS, so no static credentials are
+  # needed — the JWT itself authorizes the call.
+  #
+  # ThumbprintList is required by the resource schema but is ignored by AWS
+  # for AWS-hosted OIDC endpoints (like cognito-idp), which are validated via
+  # AWS's own trust chain rather than a pinned certificate thumbprint.
+  CognitoOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}'
+      ClientIdList:
+        - !Ref CognitoUserPoolClient
+      ThumbprintList:
+        - '9e99a48a9960b14926bb7f3b02e22da2b0ab7280'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- User-Scoped DynamoDB Role (Zero-Trust, per-request) ---
+  # A single shared role assumed at runtime by the agent on behalf of the
+  # signed-in user via AssumeRoleWithWebIdentity. The user's ID token carries
+  # the 'https://aws.amazon.com/tags' claim, which STS converts into the
+  # session tag aws:PrincipalTag/department. DynamoDB access is then scoped to
+  # that department via the LeadingKeys condition — so the effective access is
+  # bound to the user's own token on every request, not to a static role.
+  UserScopedDynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CustomerHub-UserScopedDynamoDB-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref CognitoOIDCProvider
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+              - sts:TagSession
+            # Note: the token audience (aud) is restricted by the OIDC
+            # provider's ClientIdList above — STS rejects any token whose
+            # 'aud' is not a registered client during
+            # AssumeRoleWithWebIdentity. An explicit StringEquals condition
+            # on '<issuer>:aud' is not used here because CloudFormation does
+            # not allow an intrinsic function (the dynamic pool ID) as a
+            # policy condition KEY. ClientIdList provides the same guarantee.
+      Policies:
+        - PolicyName: DynamoDBDepartmentScoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DepartmentScopedDynamoDBAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource: !GetAtt CustomerHubDataTable.Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                      - '${aws:PrincipalTag/department}'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- S3 Knowledge Base Bucket ---
+  KnowledgeBaseBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If
+        - HasCustomBucketName
+        - !Ref KnowledgeBaseBucketName
+        - !Sub 'customerhub-knowledge-base-${AWS::AccountId}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+  KnowledgeBaseBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KnowledgeBaseBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt KnowledgeBaseBucket.Arn
+              - !Sub '${KnowledgeBaseBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # --- DynamoDB Table ---
+  CustomerHubDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'CustomerHubData-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Per-Department AgentCore Execution Roles ---
+  # Each department gets its own role with hardcoded ABAC conditions.
+  # No sts:TagSession — department is baked into the policy statically.
+  # Each role is assigned to a separate AgentCore Runtime deployment.
+
+  SalesAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CustomerHub-SalesAgent-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: S3SalesOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SalesS3Access
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${KnowledgeBaseBucket.Arn}/*'
+                Condition:
+                  StringEquals:
+                    s3:ExistingObjectTag/Department: 'Sales'
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeBedrockModels
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  # Cross-region inference profile (model id has a 'us.' prefix)
+                  # routes to foundation models in multiple regions, so both the
+                  # inference-profile ARN and the underlying foundation-model
+                  # ARNs (region-wildcarded) must be permitted.
+                  - !Sub 'arn:aws:bedrock:*::foundation-model/*'
+                  - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+              - Sid: RetrieveFromKnowledgeBase
+                Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*'
+        - PolicyName: ECRPullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRPull
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: '*'
+        - PolicyName: AgentCoreIdentityAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AgentCoreIdentity
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetResourceOauth2Token
+                Resource:
+                  - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: SecretsManagerForCredentialProvider
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:bedrock-agentcore-identity*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:salesforce-token-exchange-secret-${Environment}*'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Department
+          Value: Sales
+        - Key: Environment
+          Value: !Ref Environment
+
+  FinanceAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CustomerHub-FinanceAgent-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: S3FinanceOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: FinanceS3Access
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${KnowledgeBaseBucket.Arn}/*'
+                Condition:
+                  StringEquals:
+                    s3:ExistingObjectTag/Department: 'Finance'
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeBedrockModels
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  # Cross-region inference profile (model id has a 'us.' prefix)
+                  # routes to foundation models in multiple regions, so both the
+                  # inference-profile ARN and the underlying foundation-model
+                  # ARNs (region-wildcarded) must be permitted.
+                  - !Sub 'arn:aws:bedrock:*::foundation-model/*'
+                  - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+              - Sid: RetrieveFromKnowledgeBase
+                Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*'
+        - PolicyName: ECRPullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRPull
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: '*'
+        - PolicyName: AgentCoreIdentityAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AgentCoreIdentity
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetResourceOauth2Token
+                Resource:
+                  - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: SecretsManagerForCredentialProvider
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:bedrock-agentcore-identity*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:salesforce-token-exchange-secret-${Environment}*'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Department
+          Value: Finance
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Knowledge Base IAM Role ---
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CustomerHubKnowledgeBaseRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt KnowledgeBaseBucket.Arn
+                  - !Sub '${KnowledgeBaseBucket.Arn}/*'
+        - PolicyName: BedrockEmbedding
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+        - PolicyName: AOSSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource:
+                  - !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+        - PolicyName: S3VectorsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3vectors:CreateBucket
+                  - s3vectors:GetBucket
+                  - s3vectors:ListBuckets
+                  - s3vectors:CreateIndex
+                  - s3vectors:GetIndex
+                  - s3vectors:ListIndexes
+                  - s3vectors:PutVectors
+                  - s3vectors:GetVectors
+                  - s3vectors:QueryVectors
+                  - s3vectors:DeleteVectors
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: Project
+          Value: CustomerHub
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+
+  PreTokenGenerationFunctionArn:
+    Description: Pre-Token Generation Lambda ARN
+    Value: !GetAtt PreTokenGenerationFunction.Arn
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolArn'
+
+  KnowledgeBaseBucketName:
+    Description: S3 Knowledge Base Bucket Name
+    Value: !Ref KnowledgeBaseBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseBucketName'
+
+  KnowledgeBaseBucketArn:
+    Description: S3 Knowledge Base Bucket ARN
+    Value: !GetAtt KnowledgeBaseBucket.Arn
+
+  CustomerHubDataTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref CustomerHubDataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-CustomerHubDataTableName'
+
+  CustomerHubDataTableArn:
+    Description: DynamoDB Table ARN
+    Value: !GetAtt CustomerHubDataTable.Arn
+
+  SalesAgentRoleArn:
+    Description: Sales department AgentCore execution role ARN
+    Value: !GetAtt SalesAgentRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SalesAgentRoleArn'
+
+  FinanceAgentRoleArn:
+    Description: Finance department AgentCore execution role ARN
+    Value: !GetAtt FinanceAgentRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FinanceAgentRoleArn'
+
+  UserScopedDynamoDBRoleArn:
+    Description: Shared role assumed per-request via AssumeRoleWithWebIdentity for department-scoped DynamoDB access
+    Value: !GetAtt UserScopedDynamoDBRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-UserScopedDynamoDBRoleArn'
+
+  KnowledgeBaseRoleArn:
+    Description: Knowledge Base IAM Role ARN
+    Value: !GetAtt KnowledgeBaseRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseRoleArn'
+
+  SalesforceProviderName:
+    Condition: HasSalesforceConfig
+    Description: AgentCore Identity Salesforce credential provider name
+    Value: !Ref SalesforceCredentialProvider
+
+  SalesforceProviderArn:
+    Condition: HasSalesforceConfig
+    Description: AgentCore Identity Salesforce credential provider ARN
+    Value: !GetAtt SalesforceCredentialProvider.CredentialProviderArn
+
+  SalesforceProviderCallbackUrl:
+    Condition: HasSalesforceConfig
+    Description: >
+      AgentCore Identity callback URL — register this in the Salesforce
+      Connected App's callback URL and in AgentCore Workload Identity
+      allowed-resource-oauth2-return-urls.
+    Value: !GetAtt SalesforceCredentialProvider.CallbackUrl
+
+  SalesforceTokenExchangeSecretArn:
+    Condition: HasSalesforceConfig
+    Description: Secrets Manager ARN storing the Salesforce client secret
+    Value: !Ref SalesforceTokenExchangeSecret

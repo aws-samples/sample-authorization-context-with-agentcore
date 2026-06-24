@@ -1,0 +1,15 @@
+CustomerHub Sales Playbook - Enterprise Accounts
+
+Contract Details:
+- CUSTOMER#456 | CONTRACT#ENT-2024 | Value: $250,000 | Term: 24 months | Status: Active
+- CUSTOMER#457 | CONTRACT#ENT-2023 | Value: $180,000 | Term: 12 months | Status: Renewal
+- CUSTOMER#458 | CONTRACT#ENT-2024 | Value: $95,000  | Term: 36 months | Status: Negotiation
+
+Pipeline Summary:
+- Active Opportunities: 12
+- Weighted Pipeline Value: $1.2M
+- Average Deal Size: $175,000
+- Win Rate: 34%
+
+Department: Sales
+Classification: Confidential

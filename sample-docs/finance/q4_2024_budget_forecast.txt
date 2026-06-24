@@ -1,0 +1,30 @@
+CustomerHub Finance — Q4 2024 Budget Forecast
+
+Revenue Projections:
+- October 2024:  $520,000 (confirmed contracts + renewals)
+- November 2024: $485,000 (pipeline weighted at 60%)
+- December 2024: $610,000 (year-end enterprise closings)
+- Q4 Total Projected: $1,615,000
+
+Expense Categories:
+- Cloud Infrastructure: $142,000 (AWS compute, storage, networking)
+- Personnel: $890,000 (salaries, benefits, contractor fees)
+- Software Licenses: $67,000 (SaaS tools, dev tooling, security)
+- Marketing: $115,000 (events, digital campaigns, content)
+- Travel & Entertainment: $38,000 (customer visits, conferences)
+- Q4 Total Expenses: $1,252,000
+
+Net Operating Margin: $363,000 (22.5%)
+
+Capital Expenditure Requests:
+- Data center expansion Phase 2: $280,000 (approved, Q4 disbursement)
+- Security audit tooling: $45,000 (pending CFO approval)
+
+Accounts Receivable Aging:
+- 0-30 days:  $234,500 (current)
+- 31-60 days: $89,200 (follow-up initiated)
+- 61-90 days: $42,100 (escalated to collections)
+- 90+ days:   $18,700 (write-off candidate, legal review)
+
+Department: Finance
+Classification: Confidential — Executive Distribution Only

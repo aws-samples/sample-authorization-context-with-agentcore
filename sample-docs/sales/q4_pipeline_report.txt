@@ -1,0 +1,42 @@
+CustomerHub Sales — Q4 2024 Pipeline Report
+
+Active Opportunities:
+
+1. Acme Corp — Platform Expansion
+   - Value: $450,000 | Stage: Negotiation | Close Date: 2024-11-15
+   - Champion: VP Engineering | Decision Maker: CTO
+   - Notes: Adding 200 seats, wants SSO integration by Q1 2025
+   - Probability: 75%
+
+2. Globex Inc — New Logo
+   - Value: $320,000 | Stage: Proposal | Close Date: 2024-12-01
+   - Champion: Director of Sales Ops | Decision Maker: CRO
+   - Notes: Replacing RivalCRM Pro, POC completed successfully
+   - Probability: 60%
+
+3. Initech — Renewal + Upsell
+   - Value: $180,000 | Stage: Renewal | Close Date: 2024-10-31
+   - Champion: IT Manager | Decision Maker: VP IT
+   - Notes: Current 50-seat contract, expanding to 120 seats
+   - Probability: 90%
+
+4. Umbrella Corp — Enterprise Deal
+   - Value: $750,000 | Stage: Discovery | Close Date: 2025-01-31
+   - Champion: Head of Digital | Decision Maker: CEO
+   - Notes: Multi-year deal, requires on-prem deployment option
+   - Probability: 25%
+
+5. Stark Industries — Competitive Displacement
+   - Value: $280,000 | Stage: Demo | Close Date: 2024-12-15
+   - Champion: Sales Director | Decision Maker: COO
+   - Notes: Currently on CloudDesk, frustrated with reporting
+   - Probability: 40%
+
+Pipeline Summary:
+- Total Pipeline Value: $1,980,000
+- Weighted Pipeline: $892,000
+- Quota: $1,200,000
+- Coverage Ratio: 1.65x
+
+Department: Sales
+Classification: Confidential

@@ -1,0 +1,40 @@
+CustomerHub Sales — Competitive Analysis 2024
+
+Primary Competitors:
+
+1. RivalCRM Pro
+   - Market share: 18%
+   - Strengths: Strong mobile app, AI-powered lead scoring
+   - Weaknesses: Limited customization, no on-prem option
+   - Pricing: $85/user/month (Enterprise), $45/user/month (Standard)
+   - Key wins against us: Initech (mobile-first requirement), Vandelay (price)
+
+2. CloudDesk Suite
+   - Market share: 12%
+   - Strengths: Deep integration with productivity tools, free tier
+   - Weaknesses: Poor reporting, slow customer support
+   - Pricing: $120/user/month (Enterprise), free tier up to 5 users
+   - Key wins against us: Stark Industries (existing ecosystem lock-in)
+
+3. DataForce CX
+   - Market share: 8%
+   - Strengths: Advanced analytics, data warehouse integration
+   - Weaknesses: Complex setup, steep learning curve
+   - Pricing: Custom pricing only, typically $150-200/user/month
+   - Key wins against us: Wayne Enterprises (analytics requirement)
+
+Our Differentiators:
+- Department-level access control (unique in market)
+- Native AWS integration for enterprise security
+- Flexible deployment: SaaS, hybrid, or on-prem
+- Average implementation time: 6 weeks vs industry average 14 weeks
+
+Win/Loss Analysis (Last 6 Months):
+- Total opportunities: 47
+- Wins: 16 (34%)
+- Losses: 19 (40%)
+- No decision: 12 (26%)
+- Top loss reason: Price (42%), Feature gap (31%), Incumbent advantage (27%)
+
+Department: Sales
+Classification: Confidential
